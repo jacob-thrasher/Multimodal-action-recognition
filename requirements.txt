@@ -1,7 +1,0 @@
-torch
-pyyaml
-spacy
-numpy
-scipy
-sklearn
-tensorboard
