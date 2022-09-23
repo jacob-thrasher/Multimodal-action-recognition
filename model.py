@@ -291,7 +291,7 @@ class TextRepresentations(nn.Module):
 
         return text
 
-class VideoRepresentationLayer(nn.Module):
+class VideoRepresentations(nn.Module):
     """
     Embeds video component via tubelet embedding and gives final representation for cross attention
     """
@@ -347,25 +347,25 @@ class CrossAttentionLayer(nn.Module):
 
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, text, audio):
+    def forward(self, video, audio):
         # text : [batch_size, text_len, hid_dim]
         # audio : [batch_size, audio_len, hid_dim
 
         # get self-attention
-        _text, _ = self.self_attention(text, audio, audio)
+        _video, _ = self.self_attention(video, audio, audio)
 
         # LayerNorm after dropout
-        text = self.self_attn_layer_norm(text + self.dropout(_text))
+        video = self.self_attn_layer_norm(video + self.dropout(_video))
         # text : [batch_size, text_len, hid_dim]
 
         # FeedForward
-        _text = self.feed_forward(text)
+        _video = self.feed_forward(video)
 
         # layerNorm after dropout
-        text = self.ff_layer_norm(text + self.dropout(_text))
+        video = self.ff_layer_norm(video + self.dropout(_video))
         # text: [batch_size, text_len, hid_dim]
 
-        return text
+        return video
 
 
 # Model
@@ -375,15 +375,15 @@ class Model(nn.Module):
     We will use <sos> token for prediction of classes
     """
 
-    def __init__(self, audio_split_samples, hid_dim, audio_representation_layers, n_heads, pf_dim, dropout, max_length \
-                 , len_text_vocab, text_pad_index, text_representation_layers, \
+    def __init__(self, audio_split_samples, hid_dim, audio_representation_layers, n_heads, pf_dim, dropout, max_length, \
+                 video_dim, p_dim, video_representation_layers, \
                  cross_attention_layers, \
-                 output_dim_1, output_dim_2, output_dim_3,config):
+                 output_dim_1, output_dim_2, output_dim_3, config):
         super().__init__()
         self.audio_representations = AudioRepresentations(audio_split_samples, hid_dim, audio_representation_layers,
                                                           n_heads, pf_dim, dropout, max_length)
-        self.text_representations = TextRepresentations(len_text_vocab, hid_dim, text_representation_layers, n_heads,
-                                                        pf_dim, dropout, text_pad_index, max_length)
+        self.video_representations = VideoRepresentations(input_dim=video_dim, p_dim=p_dim, hid_dim=hid_dim, n_layers=video_representation_layers,
+                                                        n_heads=n_heads, pf_dim=pf_dim, dropout=dropout)
 
         self.cross_attention = nn.ModuleList(
             [CrossAttentionLayer(hid_dim, n_heads, pf_dim, dropout) for _ in range(cross_attention_layers)])
@@ -402,20 +402,20 @@ class Model(nn.Module):
 
         self.config = config
 
-    def forward(self, audio, text, label_1, label_2, label_3):
+    def forward(self, video, audio, label_1, label_2, label_3):
         # audio : [batch_size, max_audio_len]
         # text : [batch_size, src_len]
 
         audio = self.audio_representations(audio)
         # audio : [batch_size, audio_len, hid_dim] where audio_len= max_audio_len/audio_split_samples
 
-        text = self.text_representations(text)
+        video = self.video_representations(video)
         # text : [batch_size, src_len, hid_dim]
 
         for layer in self.cross_attention:
-            text = layer(text, audio)
+            crs_attn_out = layer(video, audio)
 
-        pred_token = text[:, 0, :]
+        pred_token = crs_attn_out[:, 0, :]
         # pred_token : [batch_size, hid_dim]
 
         output_1 = self.feed_forward_1(pred_token)
