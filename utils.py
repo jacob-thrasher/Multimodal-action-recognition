@@ -8,9 +8,14 @@ import logging
 from collections import Counter
 import csv
 import pickle
+import random
 import itertools
 from sklearn.metrics import f1_score
 import yaml
+import decord
+from decord import VideoReader
+from decord import cpu, gpu
+import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +131,73 @@ class Dataset:
         _, wav = wavfile.read(os.path.join(self.wavs_location,self.audio[item]))
         return wav, self.text[item], self.action[item], self.object[item], self.position[item]
 
+class VA_Dataset(nn.Dataset):
+    def __init__(self, root, v_dim=(128, 128, 32), priority='speed'):
+        '''
+        Creates dataset based on Video/Audio pairs. Obtains audio by extracting it from video
+
+        Args:
+            root - root directory of data
+            v_dim - Desired video dimensions in the form (W, H, F)
+            priority - Data loading priority. 
+                'speed' loads all data up from for faster training
+                'space' loads data in __getitem__ in case of memory restrictions
+        '''
+        assert priority in ['speed', 'space'], f'Parameter priority should be "speed" or "space", found: {priority}'
+
+        self.root = root
+        self.v_dim = v_dim
+        self.n_frames = v_dim[2]
+        self.paths = []
+        self.videos = []
+        self.priority = priority
+
+        for folder in os.listdir(root):
+            abs_folder = os.path.join(root, folder)
+            self.paths += self.crawl_folder(abs_folder)
+
+        if priority == 'speed':
+            for path in tqdm(self.paths, desc=f'Loading videos'):
+                self.videos.append(self.extract_frames(path))
+
+    def __len__(self):
+        return len(self.paths)
+
+    def __getitem__(self, idx):
+        if self.priority == 'speed':
+            return self.videos[idx]
+        else:
+            return self.extract_frames(self.paths[idx])
+
+    def crawl_folder(self, folder):
+        paths = []
+        for item in os.listdir(folder):
+            if item.endswith('avi'):
+                paths.append(os.path.join(folder, item))
+            elif os.path.isdir(item):
+                subpaths = self.crawl_folder(os.path.join(folder, item))
+                paths += subpaths
+        return paths
+
+
+    def extract_frames(self, video, start=-1, end=-1):
+        decord.bridge.set_bridge('torch')
+        vr = VideoReader(video, ctx=cpu(0), width=self.dim[0], height=self.dim[1])
+        total_frames = self.n_frames
+        gap = int(len(vr) / total_frames)
+
+        if gap != 0:
+            if start < 0: start = 0
+            if end < 0: end = len(vr)
+            i = list(range(start, end, gap))
+            frames = vr.get_batch(i) / 255
+        else:
+            frames = []
+            while len(frames) < total_frames:
+                frames.append(vr[0] / 255)
+            frames = torch.stack(frames)
+
+        return frames[0:self.n_frames]
 
 def load_csv(path, file_name):
     # Loads a csv and returns columns:
