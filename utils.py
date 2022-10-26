@@ -16,6 +16,7 @@ import decord
 from decord import VideoReader
 from decord import cpu, gpu
 import tqdm
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -132,7 +133,7 @@ class Dataset:
         return wav, self.text[item], self.action[item], self.object[item], self.position[item]
 
 class VA_Dataset(nn.Dataset):
-    def __init__(self, root, v_dim=(128, 128, 32), priority='speed'):
+    def __init__(self, root, labeljson, v_dim=(128, 128, 32), priority='speed'):
         '''
         Creates dataset based on Video/Audio pairs. Obtains audio by extracting it from video
 
@@ -145,40 +146,40 @@ class VA_Dataset(nn.Dataset):
         '''
         assert priority in ['speed', 'space'], f'Parameter priority should be "speed" or "space", found: {priority}'
 
-        self.root = root
+        v_path = os.path.join(root, 'video')
+        a_path = os.path.join(root, 'audio')
+        self.video_names = os.listdir(self.v_path)  # For lookups
+        self.audio_names = os.listdir(self.a_path)  # For lookups
+        self.video_paths = []                       # Abs path to mp4 file
+        self.audio_paths = []                       # Abs path to wav file
         self.v_dim = v_dim
         self.n_frames = v_dim[2]
-        self.paths = []
-        self.videos = []
         self.priority = priority
+        with open(labeljson, 'w') as f:
+            self.label_dict = json.load(f)
 
-        for folder in os.listdir(root):
-            abs_folder = os.path.join(root, folder)
-            self.paths += self.crawl_folder(abs_folder)
+        if len(self.video_names) != len(self.audio_names):
+            raise RuntimeError(f'Incompatible video/audio pairs\nVideo: {len(self.v_path)} samples\nAudio: {len(self.a_path)} samples')
 
         if priority == 'speed':
-            for path in tqdm(self.paths, desc=f'Loading videos'):
-                self.videos.append(self.extract_frames(path))
+            for i in tqdm(range(len(self.video_names)), desc=f'Loading videos'):
+                self.video_paths.append(self.extract_frames(os.path.join(v_path, self.video_names[i])))
+                _, wav = wavfile.read(os.path.join(a_path, self.audio_names[i]))
+                self.audio_paths.append(wav)
 
     def __len__(self):
-        return len(self.paths)
+        return len(self.video_names)
 
     def __getitem__(self, idx):
+        item_name = self.video_names[idx].split('.')[0] # Shares root name with corresponding wav
+        label = self.label_dict[item_name]
+
         if self.priority == 'speed':
-            return self.videos[idx]
+            return self.video_paths[idx], self.audio_paths[idx], label
         else:
-            return self.extract_frames(self.paths[idx])
-
-    def crawl_folder(self, folder):
-        paths = []
-        for item in os.listdir(folder):
-            if item.endswith('avi'):
-                paths.append(os.path.join(folder, item))
-            elif os.path.isdir(item):
-                subpaths = self.crawl_folder(os.path.join(folder, item))
-                paths += subpaths
-        return paths
-
+            v = self.extract_frames(self.video_paths[idx])
+            _, a = wavfile.read(self.audio_paths[idx])
+            return v, a, label
 
     def extract_frames(self, video, start=-1, end=-1):
         decord.bridge.set_bridge('torch')
