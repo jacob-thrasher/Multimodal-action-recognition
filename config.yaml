@@ -1,9 +1,10 @@
 data:
-  path: data/
+  path: /mnt/sdc/jacob
   train_file: train_data.csv
   valid_file: valid_data.csv
   wavs_location: "../data/"
 model_name: multimodal-multilabel-model.pt
+priority: space
 optimizer:
   type: "Adam"
   lr: 0.0001
@@ -11,7 +12,7 @@ optimizer:
   beta2: 0.999
 
 epochs : 10
-batch_size : 100
+batch_size : 32
 positional_encoding_max_len: 5000
 audio_split_samples: 1000
 hid_dim: 256
@@ -19,6 +20,9 @@ audio_representation_layers: 3
 n_heads: 8
 pf_dim: 512
 dropout: 0.2
+video_represntation_layers: 2
+v_dim: 64, 64, 32
+p_dim: 16, 16, 4
 text_representation_layers: 2
 cross_attention_layers: 2
 clip : 1

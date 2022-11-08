@@ -2,6 +2,7 @@ import os.path
 import numpy as np
 import torch
 import torch.nn as nn
+from torch.utils.data import Dataset
 from scipy.io import wavfile
 import spacy
 import logging
@@ -15,13 +16,16 @@ import yaml
 import decord
 from decord import VideoReader
 from decord import cpu, gpu
-import tqdm
+from tqdm import tqdm
 import json
+from PIL import Image
+import torchvision.transforms as T
 
 logger = logging.getLogger(__name__)
 
-logger.info("----Loading Spacy----")
-spacy_en = spacy.load('en_core_web_sm')
+# logger.info("----Loading Spacy----")
+# spacy_en = spacy.load('en_core_web_sm')
+spacy_en = None
 
 
 # Calculate F1: use scikit learn and use weighted and use
@@ -30,14 +34,8 @@ spacy_en = spacy.load('en_core_web_sm')
 
 
 def get_f1(y_pred, y_label):
-
-    f1 = {"action_f1": f1_score(np.array(list(itertools.chain.from_iterable(y_pred[0]))),
-                                list(itertools.chain.from_iterable(y_label[0])), average="weighted"),
-          "object_f1": f1_score(np.array(list(itertools.chain.from_iterable(y_pred[1]))),
-                                list(itertools.chain.from_iterable(y_label[1])), average="weighted"),
-          "position_f1": f1_score(np.array(list(itertools.chain.from_iterable(y_pred[2]))),
-                                  list(itertools.chain.from_iterable(y_label[2])), average="weighted")}
-
+    f1 = f1_score(np.array(list(itertools.chain.from_iterable(y_pred))),
+                    list(itertools.chain.from_iterable(y_label)), average="weighted")
     return f1
 
 
@@ -78,7 +76,7 @@ def numericalize(inputs, vocab=None, tokenize=False):
     return numericalized_inputs, vocab
 
 
-def collate_fn(batch,device, text_pad_value, audio_pad_value,audio_split_samples):
+def collate_fn(batch, device, audio_pad_value, audio_split_samples):
     """
     We use this function to pad the inputs so that they are of uniform length
     and convert them to tensor
@@ -86,37 +84,34 @@ def collate_fn(batch,device, text_pad_value, audio_pad_value,audio_split_samples
     Note: This function would fail while using Iterable type dataset because
     while calculating max lengths the items in iterator will vanish.
     """
+
     max_audio_len = 0
-    max_text_len = 0
 
     batch_size = len(batch)
 
-    for audio_clip, transcript, _, _, _ in batch:
+    for _, audio_clip, _ in batch:
         if len(audio_clip) > max_audio_len:
             max_audio_len = len(audio_clip)
-        if len(transcript) > max_text_len:
-            max_text_len = len(transcript)
 
     # We have to pad the audio such that the audio length is divisible by audio_split_samples
     max_audio_len = (int(max_audio_len/audio_split_samples)+1)*audio_split_samples
 
+    video = torch.stack([batch[0][0] for i in batch])
     audio = torch.FloatTensor(batch_size, max_audio_len).fill_(audio_pad_value).to(device)
-    text = torch.LongTensor(batch_size, max_text_len).fill_(text_pad_value).to(device)
-    action = torch.LongTensor(batch_size).fill_(0).to(device)
-    object_ = torch.LongTensor(batch_size).fill_(0).to(device)
-    position = torch.LongTensor(batch_size).fill_(0).to(device)
-
-    for i, (audio_clip, transcript, action_taken, object_chosen, position_chosen) in enumerate(batch):
-        audio[i][:len(audio_clip)] = torch.tensor(audio_clip.tolist())
-        text[i][:len(transcript)] = torch.tensor(transcript)
-        action[i] = action_taken
-        object_[i] = object_chosen
-        position[i] = position_chosen
-
-    return audio, text, action, object_, position
+    label = torch.LongTensor(batch_size).fill_(0).to(device)
 
 
-class Dataset:
+    for i, (_, audio_clip, l) in enumerate(batch):
+        # aslist = audio_clip.tolist()
+        # astensor = torch.tensor(aslist)
+
+        audio[i][:len(audio_clip)] = audio_clip
+        label[i] = int(l)           # Convert from string ('0') to int (0)
+
+    return video, audio, label
+
+
+class VT_Dataset:
     def __init__(self, audio, text, action, object_, position, wavs_location):
         self.audio = audio
         self.text = text
@@ -132,8 +127,8 @@ class Dataset:
         _, wav = wavfile.read(os.path.join(self.wavs_location,self.audio[item]))
         return wav, self.text[item], self.action[item], self.object[item], self.position[item]
 
-class VA_Dataset(nn.Dataset):
-    def __init__(self, root, labeljson, v_dim=(128, 128, 32), priority='speed'):
+class VA_Dataset(Dataset):
+    def __init__(self, root, v_dim=(128, 128, 32), priority='speed', load_audio='spec', spec_size=(128, 128)):
         '''
         Creates dataset based on Video/Audio pairs. Obtains audio by extracting it from video
 
@@ -143,47 +138,54 @@ class VA_Dataset(nn.Dataset):
             priority - Data loading priority. 
                 'speed' loads all data up from for faster training
                 'space' loads data in __getitem__ in case of memory restrictions
+            load_audio - Type of audio data to load.
+                'wav' loads from .wav files
+                'spec' loads from spectrogram pngs
         '''
         assert priority in ['speed', 'space'], f'Parameter priority should be "speed" or "space", found: {priority}'
 
-        v_path = os.path.join(root, 'video')
-        a_path = os.path.join(root, 'audio')
-        self.video_names = os.listdir(self.v_path)  # For lookups
-        self.audio_names = os.listdir(self.a_path)  # For lookups
-        self.video_paths = []                       # Abs path to mp4 file
-        self.audio_paths = []                       # Abs path to wav file
+        self.v_path = os.path.join(root, 'video')
+        self.a_path = os.path.join(root, 'audio')
+        self.videos = []
+        self.audios = []
         self.v_dim = v_dim
         self.n_frames = v_dim[2]
         self.priority = priority
-        with open(labeljson, 'w') as f:
-            self.label_dict = json.load(f)
+        self.load_audio = load_audio
+        self.preprocess_spec = T.Compose([
+            T.Resize(spec_size),
+            T.ToTensor()
+        ])
+        labels = os.path.join(root, 'labels.json')
+        with open(labels, 'r') as f:
+            self.data = json.load(f)
 
-        if len(self.video_names) != len(self.audio_names):
-            raise RuntimeError(f'Incompatible video/audio pairs\nVideo: {len(self.v_path)} samples\nAudio: {len(self.a_path)} samples')
-
+        # Convert data dict to hold tuples containing (video, audio, label)
+        # ( data[item_name] = (video, audio, label) )
         if priority == 'speed':
-            for i in tqdm(range(len(self.video_names)), desc=f'Loading videos'):
-                self.video_paths.append(self.extract_frames(os.path.join(v_path, self.video_names[i])))
-                _, wav = wavfile.read(os.path.join(a_path, self.audio_names[i]))
-                self.audio_paths.append(wav)
+            for i in tqdm(range(len(self.data)), desc=f'Loading videos'):
+                item_name = list(self.data)[i]
+                print(item_name)
+                video, audio = self.get_video_audio(item_name)
+                self.data[item_name] = (video, audio, self.data[item_name])
 
     def __len__(self):
-        return len(self.video_names)
+        return len(self.data)
 
     def __getitem__(self, idx):
-        item_name = self.video_names[idx].split('.')[0] # Shares root name with corresponding wav
-        label = self.label_dict[item_name]
+        item_name = list(self.data)[idx]
+        label = self.data[item_name]
 
         if self.priority == 'speed':
-            return self.video_paths[idx], self.audio_paths[idx], label
+            return self.data[item_name]
         else:
-            v = self.extract_frames(self.video_paths[idx])
-            _, a = wavfile.read(self.audio_paths[idx])
-            return v, a, label
+            video, audio = self.get_video_audio(item_name)
+            # print(f'Video: {video.size()}\nAudio: {audio.size()}')
+        return video, audio, label      
 
     def extract_frames(self, video, start=-1, end=-1):
         decord.bridge.set_bridge('torch')
-        vr = VideoReader(video, ctx=cpu(0), width=self.dim[0], height=self.dim[1])
+        vr = VideoReader(video, ctx=cpu(0), width=self.v_dim[0], height=self.v_dim[1])
         total_frames = self.n_frames
         gap = int(len(vr) / total_frames)
 
@@ -199,6 +201,19 @@ class VA_Dataset(nn.Dataset):
             frames = torch.stack(frames)
 
         return frames[0:self.n_frames]
+
+    def get_video_audio(self, filename_no_ext):
+        v = os.path.join(self.v_path, f'{filename_no_ext}.mp4')
+        a = os.path.join(self.a_path, f'{filename_no_ext}.wav')
+
+        video = self.extract_frames(v)
+        if self.load_audio == 'wav':
+            _, audio = wavfile.read(a)
+            audio = torch.from_numpy(audio)[:, 0]     # Eliminate one audio channel
+        else:
+            audio = self.preprocess_spec(Image.open(a))
+        
+        return video, audio
 
 def load_csv(path, file_name):
     # Loads a csv and returns columns:
@@ -295,15 +310,14 @@ def train(model, train_iterator, optim, clip):
     epoch_loss = 0
 
     # Tracking accuracies
-    action_accuracy = []
-    object_accuracy = []
-    position_accuracy = []
+    accuracy = []
 
     # for f1
     y_pred = []
     y_true = []
 
     for i, batch in enumerate(train_iterator):
+        print('HERE')
         # running batch
         train_result = model(*batch)
 
@@ -319,24 +333,18 @@ def train(model, train_iterator, optim, clip):
 
         # Statistics
         epoch_loss += loss.item()
-        y_pred.append([train_result["predicted_action"].tolist(), train_result["predicted_object"].tolist(),
-                       train_result["predicted_location"].tolist()])
-        y_true.append([batch[2].tolist(), batch[3].tolist(), batch[4].tolist()])
+        y_pred.append(train_result['pred'].tolist())
+        y_true.append(batch[2].tolist())
 
-        action_accuracy.append(sum(train_result["predicted_action"] == batch[2]) / len(batch[2]) * 100)
-        object_accuracy.append(sum(train_result["predicted_object"] == batch[3]) / len(batch[2]) * 100)
-        position_accuracy.append(sum(train_result["predicted_location"] == batch[4]) / len(batch[2]) * 100)
+        accuracy.append(sum(train_result["pred"] == batch[2]) / len(batch[2]) * 100)
 
     y_pred = list(zip(*y_pred))
     y_true = list(zip(*y_true))
 
     epoch_f1 = get_f1(y_pred, y_true)
-    epoch_action_accuracy = sum(action_accuracy) / len(action_accuracy)
-    epoch_object_accuracy = sum(object_accuracy) / len(object_accuracy)
-    epoch_position_accuracy = sum(position_accuracy) / len(position_accuracy)
+    epoch_accuracy = sum(accuracy) / len(accuracy)
 
-    return epoch_loss / len(
-        train_iterator), (epoch_f1, epoch_action_accuracy, epoch_object_accuracy, epoch_position_accuracy)
+    return epoch_loss / len(train_iterator), (epoch_f1, epoch_accuracy)
 
 
 def evaluate(model, valid_iterator):
@@ -345,9 +353,7 @@ def evaluate(model, valid_iterator):
     epoch_loss = 0
 
     # Tracking accuracies
-    action_accuracy = []
-    object_accuracy = []
-    position_accuracy = []
+    accuracy = []
 
     # for f1
     y_pred = []
@@ -363,41 +369,27 @@ def evaluate(model, valid_iterator):
             # Statistics
             epoch_loss += loss.item()
 
-            y_pred.append([valid_result["predicted_action"].tolist(), valid_result["predicted_object"].tolist(),
-                           valid_result["predicted_location"].tolist()])
-            y_true.append([batch[2].tolist(), batch[3].tolist(), batch[4].tolist()])
+            y_pred.append(valid_result["pred"].tolist())
+            y_true.append(batch[2].tolist())
 
-            action_accuracy.append(sum(valid_result["predicted_action"] == batch[2]) / len(batch[2]) * 100)
-            object_accuracy.append(sum(valid_result["predicted_object"] == batch[3]) / len(batch[2]) * 100)
-            position_accuracy.append(sum(valid_result["predicted_location"] == batch[4]) / len(batch[2]) * 100)
+            accuracy.append(sum(valid_result["pred"] == batch[2]) / len(batch[2]) * 100)
 
     y_pred = list(zip(*y_pred))
     y_true = list(zip(*y_true))
 
     epoch_f1 = get_f1(y_pred, y_true)
-    epoch_action_accuracy = sum(action_accuracy) / len(action_accuracy)
-    epoch_object_accuracy = sum(object_accuracy) / len(object_accuracy)
-    epoch_position_accuracy = sum(position_accuracy) / len(position_accuracy)
+    epoch_action_accuracy = sum(accuracy) / len(accuracy)
 
-    return epoch_loss / len(
-        valid_iterator), (epoch_f1, epoch_action_accuracy, epoch_object_accuracy, epoch_position_accuracy)
+    return epoch_loss / len(valid_iterator), (epoch_f1, accuracy)
 
 
-def add_to_writer(writer,epoch,train_loss,valid_loss,train_stats,valid_stats,config):
+def add_to_writer(writer, epoch, train_loss, valid_loss, train_stats, valid_stats, config):
     writer.add_scalar("Train loss", train_loss, epoch)
     writer.add_scalar("Validation loss", valid_loss, epoch)
-    writer.add_scalar("Train Action f1", train_stats[0]['action_f1'], epoch)
-    writer.add_scalar("Train Object f1", train_stats[0]['object_f1'], epoch)
-    writer.add_scalar("Train Position f1", train_stats[0]['position_f1'], epoch)
-    writer.add_scalar("Train action accuracy", train_stats[1], epoch)
-    writer.add_scalar("Train object accuracy", train_stats[2], epoch)
-    writer.add_scalar("Train location accuracy", train_stats[3], epoch)
-    writer.add_scalar("Valid Action f1", valid_stats[0]['action_f1'], epoch)
-    writer.add_scalar("Valid Object f1", valid_stats[0]['object_f1'], epoch)
-    writer.add_scalar("Valid Position f1", valid_stats[0]['position_f1'], epoch)
-    writer.add_scalar("Valid action accuracy", valid_stats[1], epoch)
-    writer.add_scalar("Valid object accuracy", valid_stats[2], epoch)
-    writer.add_scalar("Valid location accuracy", valid_stats[3], epoch)
+    writer.add_scalar("Train f1", train_stats[0], epoch)
+    writer.add_scalar("Train accuracy", train_stats[1], epoch)
+    writer.add_scalar("Valid f1", valid_stats[0], epoch)
+    writer.add_scalar("Valid accuracy", valid_stats[1], epoch)
 
 
     writer.flush()

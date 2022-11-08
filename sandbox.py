@@ -1,58 +1,39 @@
-import ffmpeg
-import cv2
-from pprint import pprint
+from utils import  VA_Dataset, collate_fn
+from torch.utils.data import DataLoader
+from functools import partial
+from scipy import signal
+from scipy.io import wavfile
+import os
+import matplotlib.pyplot as plt
+import numpy as np
+from tqdm import tqdm
 
-def convert_to_seconds(time):
-    '''Converts time in format MM:SS to total number of seconds'''
-    time = time.split(':')
-    return int(time[0])*60 + int(time[1])
-
-path = 'D:/Big Data/TikTok/train/TikTokVideos/9.mp4'
-cap = cv2.VideoCapture(path)
-num_frames_cv2 = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-metadata = ffmpeg.probe(path)['streams']
-frame_rate = float(metadata[0]['avg_frame_rate'].split('/')[0])
-duration = metadata[0]['duration']
-num_frames_ffmpeg = float(metadata[0]['duration']) * frame_rate
-print(f'Total frames sanity check:\n\tcv2:\t{num_frames_cv2}\n\tffmpeg:\t{num_frames_ffmpeg}')
-
-_id = 0
-timestamps = ['0:00', '0:15', '0:30']
-for i in range(len(timestamps)-1):
-    start = convert_to_seconds(timestamps[i])
-    end = convert_to_seconds(timestamps[i+1])
+dst = '/mnt/sdc/jacob/spec'
+root = '/mnt/sdc/jacob/audio'
+converted = '/mnt/sdc/jacob/converted_audio'
 
 
-    in_file = ffmpeg.input(path)
-    vid = (
-        in_file
-        .trim(start=start, end=end)
-        .setpts('PTS-STARTPTS')
-        .output(f'out_{_id}.mp4')
-        .run()
-    )
-    aud = (
-        in_file
-        .filter_('atrim', start=start, end=end)
-        .filter_('asetpts', 'PTS-STARTPTS')
-        .output(f'out_{_id}.wav')
-        .run()
-    )
+for file in tqdm(os.listdir(root), desc='Converting wavs'):
+    try:
+        path = os.path.join(root, file)
+        sample_rate, samples = wavfile.read(path)
+        # samples = np.mean(samples, axis=1)
+        freq, times, spec = signal.spectrogram(samples[:, 0], sample_rate)
 
-    _id += 1
-    
-# in_file = ffmpeg.input(path)
-# print(in_file.video)
-# vid = (
-#     ffmpeg
-#     .input(path)
-#     .trim(start=100, end=100)
-#     .setpts('PTS-STARTPTS')
-# )
+        os.rename(os.path.join(root, file), os.path.join(converted, file))
 
-# aud = (
-#     ffmpeg
-#     .input(path)
-#     .trim(start=100, end=100)
-#     .setpts('PTS-STARTPTS')
-# )
+        filename = file.split('.')[0]
+
+        fig, ax = plt.subplots(1)
+        fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
+        ax.axis('off')
+        # max_ = spec.max() if spec.max() != 0 else 1
+        print(file)
+        plt.pcolormesh(1000*times, freq/1000, 10*np.log10(spec/spec.max()), vmin=-120, vmax=0, cmap='inferno')
+        ax.axis('off')
+        plt.savefig(os.path.join(dst, f'{filename}.png'), frameon=False)
+        plt.close()
+    except Exception as e:
+        print(file)
+
+

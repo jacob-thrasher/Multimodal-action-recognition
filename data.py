@@ -54,7 +54,6 @@ def splice_by_timestamp(src, dst, csvpath):
                     if type(t) == datetime.time:
                         seconds = (t.hour*60 + t.minute)*60 + t.second
                         timestamps.append(seconds)
-                timestamps.append(-1)
                 
             _id = 0
             filename = item.split('.')[0]
@@ -68,25 +67,25 @@ def splice_by_timestamp(src, dst, csvpath):
                 # writer.writerow([f'{filename}_{_id}', label])
                 labels[f'{filename}_{_id}'] = label
 
-                # in_file = ffmpeg.input(this_item) 
-                # vid = (
-                #     in_file
-                #     .trim(start=start, end=end)
-                #     .setpts('PTS-STARTPTS')
-                #     .output(os.path.join(dst, 'video', f'{filename}_{_id}.mp4'))
-                #     .run()
-                # )
-                # aud = (
-                #     in_file
-                #     .filter_('atrim', start=start, end=end)
-                #     .filter_('asetpts', 'PTS-STARTPTS')
-                #     .output(os.path.join(dst, 'audio', f'{filename}_{_id}.wav'))
-                #     .run()
-                # )
+                in_file = ffmpeg.input(this_item) 
+                vid = (
+                    in_file
+                    .trim(start=start, end=end)
+                    .setpts('PTS-STARTPTS')
+                    .output(os.path.join(dst, 'video', f'{filename}_{_id}.mp4'))
+                    .run()
+                )
+                aud = (
+                    in_file
+                    .filter_('atrim', start=start, end=end)
+                    .filter_('asetpts', 'PTS-STARTPTS')
+                    .output(os.path.join(dst, 'audio', f'{filename}_{_id}.wav'))
+                    .run()
+                )
 
                 _id += 1
 
-    print(type(labels))
+    print(labels)
     with open(os.path.join(dst, 'labels.json'), 'w') as f:
         json.dump(labels, f)
     # f.close()

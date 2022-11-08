@@ -10,6 +10,7 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from model import Model
 import time, datetime, os,sys
+from utils import VA_Dataset
 
 
 logger = logging.getLogger(__name__)
@@ -29,7 +30,8 @@ stdout_handler.setFormatter(formatter)
 logger.addHandler(file_handler)
 logger.addHandler(stdout_handler)
 
-
+valid_loss = 0
+valid_stats = (0, 0)
 # runner loop
 def runner(epochs, model, train_iterator, valid_iterator, optim, writer, config):
     clip, save_path, model_name = config["clip"], config['data']['path'], config['model_name']
@@ -40,7 +42,8 @@ def runner(epochs, model, train_iterator, valid_iterator, optim, writer, config)
         start_time = time.time()
 
         train_loss, train_stats = train(model, train_iterator, optim, clip)
-        valid_loss, valid_stats = evaluate(model, valid_iterator)
+        if valid_iterator is not None:
+            valid_loss, valid_stats = evaluate(model, valid_iterator)
 
         end_time = time.time()
 
@@ -55,11 +58,7 @@ def runner(epochs, model, train_iterator, valid_iterator, optim, writer, config)
         logger.info(f'\tTrain Loss: {train_loss:.3f}')
         logger.info(f'\t Val. Loss: {valid_loss:.3f}')
         logger.info(f'\t Train f1: {train_stats[0]} \n Valid f1: {valid_stats[0]}')
-        logger.info(f'\t Train action accuracy: {train_stats[1]:.3f} \t Valid action accuracy: {valid_stats[1]:.3f}')
-        logger.info(f'\t Train object accuracy: {train_stats[2]:.3f} \t Valid object accuracy: {valid_stats[2]:.3f}')
-        logger.info(
-            f'\t Train location accuracy: {train_stats[3]:.3f} \t Valid location accuracy: {valid_stats[3]:.3f}')
-
+        logger.info(f'\t Train accuracy: {train_stats[1]:.3f} \t Valid accuracy: {valid_stats[1]:.3f}')
         add_to_writer(writer, epoch, train_loss, valid_loss, train_stats, valid_stats, config)
 
     # dumping config file
@@ -67,10 +66,10 @@ def runner(epochs, model, train_iterator, valid_iterator, optim, writer, config)
         _ = yaml.dump(config, file)
 
 # main
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", help="location to config yaml file")
-    args = parser.parse_args()
+def main(config=None):
+    # parser = argparse.ArgumentParser()
+    # parser.add_argument("--config", help="location to config yaml file")
+    # args = parser.parse_args()
 
     # checking device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -78,7 +77,7 @@ def main():
 
     # Loading config:
     logger.info("Loading config")
-    with open(args.config) as file:
+    with open(config) as file:
         config = yaml.safe_load(file)
         for i in config:
             logger.info(f'{i} : {config[i]}')
@@ -89,18 +88,13 @@ def main():
 
     # Loading data:
     logger.info("Loading data and dataloaders")
-    train_dataset, valid_dataset, vocab = get_Dataset_and_vocabs(config['data']['path'], \
-                                                                 config['data']['train_file'], \
-                                                                 config['data']['valid_file'], \
-                                                                 config['data']['wavs_location'])
 
-    collate_fn_ = partial(collate_fn, device=device, text_pad_value=vocab['text_vocab']["<pad>"] \
-                          , audio_pad_value=0, audio_split_samples=config["audio_split_samples"])
+    train_dataset = VA_Dataset(config['data']['path'], v_dim=(224, 224, 32), priority=config['priority'])
 
-    train_dataloader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True, collate_fn=collate_fn_,
-                                  )
-    valid_dataloader = DataLoader(valid_dataset, batch_size=2 * config['batch_size'], shuffle=True,
-                                  collate_fn=collate_fn_)
+    collate_fn_ = partial(collate_fn, device=device, audio_pad_value=0, audio_split_samples=config['audio_split_samples'])
+
+    train_dataloader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True, collate_fn=collate_fn_)
+    valid_dataloader = None
 
     # Loading model
     model = Model(audio_split_samples=config["audio_split_samples"], \
@@ -110,13 +104,11 @@ def main():
                   pf_dim=config["pf_dim"], \
                   dropout=config["dropout"], \
                   max_length=config["positional_encoding_max_len"], \
-                  len_text_vocab=len(vocab['text_vocab']), \
-                  text_pad_index=vocab['text_vocab']['<pad>'], \
-                  text_representation_layers=config["text_representation_layers"], \
+                  video_dim=(224, 224, 64), \
+                  p_dim = (16, 16, 4), \
+                  video_representation_layers=config["text_representation_layers"], \
                   cross_attention_layers=config["cross_attention_layers"], \
-                  output_dim_1=len(vocab['action_vocab']), \
-                  output_dim_2=len(vocab['object_vocab']), \
-                  output_dim_3=len(vocab['position_vocab']), \
+                  output_dim=3, \
                   config=config \
                   ).to(device)
     logger.info(f'Model loaded')
@@ -137,4 +129,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main(config='config.yaml')

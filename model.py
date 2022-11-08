@@ -1,3 +1,4 @@
+from curses import resize_term
 import torch
 import torch.nn as nn
 import math
@@ -190,7 +191,6 @@ class EncodingLayer(nn.Module):
 
         return src
 
-
 class AudioRepresentations(nn.Module):
     '''
     Group of layers that give final audio representation for cross attention
@@ -291,11 +291,50 @@ class TextRepresentations(nn.Module):
 
         return text
 
+class SpecRepresentations(nn.Module):
+    """
+    Embeds spectrogram component via image patching and gives final representation for cross attention
+    """
+    def __init__(self, img_dim=(256, 512), p_dim=(16, 16), hid_dim=256, pf_dim=512, n_heads=4, n_layers=12, dropout=0):
+        super().__init__()
+        
+        W, H = img_dim
+        w, h = p_dim
+        nw, nh = W // w, H // h
+        self.hid_dim = hid_dim
+        proj_dim = 3 * w * H
+
+        self.embedding = nn.Sequential(
+            Rearrange('b c (h ph) (w pw) -> b (h w) (ph pw c)', ph=h, pw=w),
+            nn.Linear(proj_dim, hid_dim)
+        )
+        self.cls_token = nn.Parameter(torch.randn(1, 1, hid_dim))
+        self.pos_embedding = PositionalEncodingComponent(hid_dim=hid_dim, dropout=dropout, max_len=nh*nw)
+
+        self.layers = nn.ModuleList([EncodingLayer(hid_dim, n_heads, pf_dim, dropout) for _ in range(n_layers)])
+        self.dropout = nn.Dropout(dropout)
+        
+
+    def forward(self, spec):
+        spec = self.embedding(spec)
+        spec += self.pos_embedding
+
+        b, _, _ = spec.size()
+        cls_to_batch = self.cls_token.expand([b, -1, -1])
+        spec = torch.cat((cls_to_batch, spec), dim=1)
+        
+        for layer in self.layers:
+            spec = layer(spec)
+
+        return spec
+
 class VideoRepresentations(nn.Module):
     """
     Embeds video component via tubelet embedding and gives final representation for cross attention
     """
     def __init__(self, input_dim=(256, 256, 32), p_dim=(64, 64, 8), hid_dim=256, n_layers=12, n_heads=4, pf_dim=512, dropout=0):
+        super().__init__()
+
         W, H, T = input_dim
         w, h, t = p_dim
         nw, nh, nt = W // w, H // h, T // t
@@ -378,23 +417,23 @@ class Model(nn.Module):
     def __init__(self, audio_split_samples, hid_dim, audio_representation_layers, n_heads, pf_dim, dropout, max_length, \
                  video_dim, p_dim, video_representation_layers, \
                  cross_attention_layers, \
-                 output_dim_1, output_dim_2, output_dim_3, config):
+                 output_dim, config):
         super().__init__()
-        self.audio_representations = AudioRepresentations(audio_split_samples, hid_dim, audio_representation_layers,
-                                                          n_heads, pf_dim, dropout, max_length)
+        # self.audio_representations = AudioRepresentations(audio_split_samples, hid_dim, audio_representation_layers,
+        #                                                   n_heads, pf_dim, dropout, max_length)
+        self.audio_representations = SpecRepresentations(img_dim=(256, 512), p_dim=(16, 16), hid_dim=hid_dim, pf_dim=pf_dim,
+                                                        n_heads=n_heads, n_layers=audio_representation_layers, dropout=dropout)
         self.video_representations = VideoRepresentations(input_dim=video_dim, p_dim=p_dim, hid_dim=hid_dim, n_layers=video_representation_layers,
                                                         n_heads=n_heads, pf_dim=pf_dim, dropout=dropout)
 
         self.cross_attention = nn.ModuleList(
             [CrossAttentionLayer(hid_dim, n_heads, pf_dim, dropout) for _ in range(cross_attention_layers)])
 
-        self.feed_forward_1 = nn.Linear(hid_dim, output_dim_1)
-        self.feed_forward_2 = nn.Linear(hid_dim, output_dim_2)
-        self.feed_forward_3 = nn.Linear(hid_dim, output_dim_3)
+        self.feed_forward_1 = nn.Linear(hid_dim, output_dim)
 
-        self.output_dim_1 = output_dim_1
-        self.output_dim_2 = output_dim_2
-        self.output_dim_3 = output_dim_3
+
+        self.output_dim = output_dim
+
 
         self.loss_1 = nn.CrossEntropyLoss()
         self.loss_2 = nn.CrossEntropyLoss()
@@ -402,7 +441,7 @@ class Model(nn.Module):
 
         self.config = config
 
-    def forward(self, video, audio, label_1, label_2, label_3):
+    def forward(self, video, audio, label):
         # audio : [batch_size, max_audio_len]
         # text : [batch_size, src_len]
 
@@ -418,13 +457,8 @@ class Model(nn.Module):
         pred_token = crs_attn_out[:, 0, :]
         # pred_token : [batch_size, hid_dim]
 
-        output_1 = self.feed_forward_1(pred_token)
-        # output_2 = self.feed_forward_2(pred_token)
-        # output_3 = self.feed_forward_3(pred_token)
-
-        loss = self.loss_1(output_1, label_1)
-        # loss_in_object = self.loss_2(output_2, label_2)
-        # loss_in_position = self.loss_3(output_3, label_3)
+        output = self.feed_forward_1(pred_token)
+        loss = self.loss_1(output, label)
 
         # if 'mode' in self.config and self.config['mode'] == "weighted_loss":
         #     # weighted mean based on the total number of labels for actions object and position
@@ -435,12 +469,6 @@ class Model(nn.Module):
         # else:
         #     loss = (loss_in_action + loss_in_object + loss_in_position) / 3
 
-        pred = torch.argmax(output_1, -1)
-        # predicted_object = torch.argmax(output_2, -1)
-        # predicted_location = torch.argmax(output_3, -1)
-
-        # return {'loss': loss, 'loss_in_action': loss_in_action, 'loss_in_object': loss_in_object, \
-        #         'loss_in_position': loss_in_position, 'predicted_action': predicted_action, \
-        #         'predicted_object': predicted_object, 'predicted_location': predicted_location}
+        pred = torch.argmax(output, -1)
 
         return {'loss': loss, 'pred': pred}
