@@ -419,26 +419,28 @@ class Model(nn.Module):
         # pred_token : [batch_size, hid_dim]
 
         output_1 = self.feed_forward_1(pred_token)
-        output_2 = self.feed_forward_2(pred_token)
-        output_3 = self.feed_forward_3(pred_token)
+        # output_2 = self.feed_forward_2(pred_token)
+        # output_3 = self.feed_forward_3(pred_token)
 
-        loss_in_action = self.loss_1(output_1, label_1)
-        loss_in_object = self.loss_2(output_2, label_2)
-        loss_in_position = self.loss_3(output_3, label_3)
+        loss = self.loss_1(output_1, label_1)
+        # loss_in_object = self.loss_2(output_2, label_2)
+        # loss_in_position = self.loss_3(output_3, label_3)
 
-        if 'mode' in self.config and self.config['mode'] == "weighted_loss":
-            # weighted mean based on the total number of labels for actions object and position
-            # since the number of labels for actions and positions are less they are reducing
-            # the loss value to very low numbers.
-            loss = (self.output_dim_1*loss_in_action + self.output_dim_2*loss_in_object + self.output_dim_3*loss_in_position)/\
-                   (self.output_dim_1 + self.output_dim_2 + self.output_dim_3)
-        else:
-            loss = (loss_in_action + loss_in_object + loss_in_position) / 3
+        # if 'mode' in self.config and self.config['mode'] == "weighted_loss":
+        #     # weighted mean based on the total number of labels for actions object and position
+        #     # since the number of labels for actions and positions are less they are reducing
+        #     # the loss value to very low numbers.
+        #     loss = (self.output_dim_1*loss_in_action + self.output_dim_2*loss_in_object + self.output_dim_3*loss_in_position)/\
+        #            (self.output_dim_1 + self.output_dim_2 + self.output_dim_3)
+        # else:
+        #     loss = (loss_in_action + loss_in_object + loss_in_position) / 3
 
-        predicted_action = torch.argmax(output_1, -1)
-        predicted_object = torch.argmax(output_2, -1)
-        predicted_location = torch.argmax(output_3, -1)
+        pred = torch.argmax(output_1, -1)
+        # predicted_object = torch.argmax(output_2, -1)
+        # predicted_location = torch.argmax(output_3, -1)
 
-        return {'loss': loss, 'loss_in_action': loss_in_action, 'loss_in_object': loss_in_object, \
-                'loss_in_position': loss_in_position, 'predicted_action': predicted_action, \
-                'predicted_object': predicted_object, 'predicted_location': predicted_location}
+        # return {'loss': loss, 'loss_in_action': loss_in_action, 'loss_in_object': loss_in_object, \
+        #         'loss_in_position': loss_in_position, 'predicted_action': predicted_action, \
+        #         'predicted_object': predicted_object, 'predicted_location': predicted_location}
+
+        return {'loss': loss, 'pred': pred}
