@@ -91,9 +91,11 @@ def main(config=None):
 
     train_dataset = VA_Dataset(config['data']['path'], v_dim=(224, 224, 32), priority=config['priority'])
 
-    collate_fn_ = partial(collate_fn, device=device, audio_pad_value=0, audio_split_samples=config['audio_split_samples'])
-
-    train_dataloader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True, collate_fn=collate_fn_)
+    if config['load_audio'] == 'wav':
+        collate_fn_ = partial(collate_fn, device=device, audio_pad_value=0, audio_split_samples=config['audio_split_samples'])
+        train_dataloader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True, collate_fn=collate_fn_)
+    elif config['load_audio'] == 'spec':
+        train_dataloader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True)
     valid_dataloader = None
 
     # Loading model
@@ -104,7 +106,7 @@ def main(config=None):
                   pf_dim=config["pf_dim"], \
                   dropout=config["dropout"], \
                   max_length=config["positional_encoding_max_len"], \
-                  video_dim=(224, 224, 64), \
+                  video_dim=(224, 224, 32), \
                   p_dim = (16, 16, 4), \
                   video_representation_layers=config["text_representation_layers"], \
                   cross_attention_layers=config["cross_attention_layers"], \

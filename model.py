@@ -302,7 +302,7 @@ class SpecRepresentations(nn.Module):
         w, h = p_dim
         nw, nh = W // w, H // h
         self.hid_dim = hid_dim
-        proj_dim = 3 * w * H
+        proj_dim = 3 * w * h
 
         self.embedding = nn.Sequential(
             Rearrange('b c (h ph) (w pw) -> b (h w) (ph pw c)', ph=h, pw=w),
@@ -317,7 +317,7 @@ class SpecRepresentations(nn.Module):
 
     def forward(self, spec):
         spec = self.embedding(spec)
-        spec += self.pos_embedding
+        spec = self.pos_embedding(spec)
 
         b, _, _ = spec.size()
         cls_to_batch = self.cls_token.expand([b, -1, -1])
@@ -332,7 +332,7 @@ class VideoRepresentations(nn.Module):
     """
     Embeds video component via tubelet embedding and gives final representation for cross attention
     """
-    def __init__(self, input_dim=(256, 256, 32), p_dim=(64, 64, 8), hid_dim=256, n_layers=12, n_heads=4, pf_dim=512, dropout=0):
+    def __init__(self, input_dim=(256, 256, 32), p_dim=(64, 64, 8), hid_dim=256, n_layers=12, n_heads=4, pf_dim=512, dropout=0, device='cuda'):
         super().__init__()
 
         W, H, T = input_dim
@@ -344,7 +344,8 @@ class VideoRepresentations(nn.Module):
             Rearrange('b c (t pt) (h ph) (w pw) -> b t (h w) (pt ph pw c)', pt=t, ph=h, pw=w),
             nn.Linear(tubelet_dim, hid_dim)
         )
-        self.pos_embedding = nn.Parameter(torch.randn(1, 1, nh * nw, hid_dim)).repeat(1, nt, 1, 1)
+        # Note, this works for 32 frames, but not 64 for some reason. Need to mess with it
+        self.pos_embedding = nn.Parameter(torch.randn(1, 1, nh * nw, hid_dim)).repeat(1, nt, 1, 1).to(device)
         self.cls_token = nn.Parameter(torch.randn(1, 1, hid_dim))
 
         self.layers = nn.ModuleList([EncodingLayer(hid_dim, n_heads, pf_dim, dropout) for _ in range(n_layers)])
@@ -352,9 +353,9 @@ class VideoRepresentations(nn.Module):
 
 
     def forward(self, video):
+        # Expects videos in shape: [b, c, t, h, w]
         video = self.tubelet_embedding(video)
         video += self.pos_embedding
-
         b, t, hw, d = video.size()
         cls_tokens = repeat(self.cls_token, '() n d -> b t n d', b=b, t=t)
         video = torch.cat((cls_tokens, video), dim=2)

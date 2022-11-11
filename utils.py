@@ -20,6 +20,7 @@ from tqdm import tqdm
 import json
 from PIL import Image
 import torchvision.transforms as T
+import matplotlib.pyplot as plt
 
 logger = logging.getLogger(__name__)
 
@@ -102,9 +103,6 @@ def collate_fn(batch, device, audio_pad_value, audio_split_samples):
 
 
     for i, (_, audio_clip, l) in enumerate(batch):
-        # aslist = audio_clip.tolist()
-        # astensor = torch.tensor(aslist)
-
         audio[i][:len(audio_clip)] = audio_clip
         label[i] = int(l)           # Convert from string ('0') to int (0)
 
@@ -145,7 +143,7 @@ class VA_Dataset(Dataset):
         assert priority in ['speed', 'space'], f'Parameter priority should be "speed" or "space", found: {priority}'
 
         self.v_path = os.path.join(root, 'video')
-        self.a_path = os.path.join(root, 'audio')
+        self.a_path = os.path.join(root, 'spec')
         self.videos = []
         self.audios = []
         self.v_dim = v_dim
@@ -173,6 +171,7 @@ class VA_Dataset(Dataset):
         return len(self.data)
 
     def __getitem__(self, idx):
+        print(f"Getting item {idx}...")
         item_name = list(self.data)[idx]
         label = self.data[item_name]
 
@@ -204,16 +203,17 @@ class VA_Dataset(Dataset):
 
     def get_video_audio(self, filename_no_ext):
         v = os.path.join(self.v_path, f'{filename_no_ext}.mp4')
-        a = os.path.join(self.a_path, f'{filename_no_ext}.wav')
 
         video = self.extract_frames(v)
         if self.load_audio == 'wav':
+            a = os.path.join(self.a_path, f'{filename_no_ext}.wav')
             _, audio = wavfile.read(a)
             audio = torch.from_numpy(audio)[:, 0]     # Eliminate one audio channel
         else:
-            audio = self.preprocess_spec(Image.open(a))
-        
-        return video, audio
+            a = os.path.join(self.a_path, f'{filename_no_ext}.png')
+            audio = self.preprocess_spec(Image.open(a))[:3]
+
+        return video.permute(3, 0, 1, 2), audio
 
 def load_csv(path, file_name):
     # Loads a csv and returns columns:
@@ -304,7 +304,7 @@ def epoch_time(start_time, end_time):
     return elapsed_mins, elapsed_secs
 
 
-def train(model, train_iterator, optim, clip):
+def train(model, train_iterator, optim, clip, device='cuda'):
     model.train()
 
     epoch_loss = 0
@@ -316,10 +316,12 @@ def train(model, train_iterator, optim, clip):
     y_pred = []
     y_true = []
 
-    for i, batch in enumerate(train_iterator):
+    for i, (video, audio, label) in enumerate(train_iterator):
         print('HERE')
         # running batch
-        train_result = model(*batch)
+        video = video.to(device)
+        audio = audio.to(device)
+        train_result = model(video, audio, label)
 
         optim.zero_grad()
 
@@ -334,9 +336,9 @@ def train(model, train_iterator, optim, clip):
         # Statistics
         epoch_loss += loss.item()
         y_pred.append(train_result['pred'].tolist())
-        y_true.append(batch[2].tolist())
+        y_true.append(label.tolist())
 
-        accuracy.append(sum(train_result["pred"] == batch[2]) / len(batch[2]) * 100)
+        accuracy.append(sum(train_result["pred"] == label) / len(label) * 100)
 
     y_pred = list(zip(*y_pred))
     y_true = list(zip(*y_true))
